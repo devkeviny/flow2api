@@ -538,6 +538,7 @@ class Database:
                     ("protocol_mode", "TEXT DEFAULT 'session'"),  # ST 刷新模式
                     ("google_cookies", "TEXT DEFAULT ''"),  # 协议登录 Google Cookies
                     ("login_account", "TEXT DEFAULT ''"),  # 协议登录账号提示
+                    ("authuser", "INTEGER DEFAULT 0"),  # 同一 Cookie 共享账号索引 (?authuser=N)
                     ("login_password", "TEXT DEFAULT ''"),  # 预留
                     ("proxy_url", "TEXT DEFAULT ''"),  # 协议刷新代理
                     ("auto_refresh_enabled", "BOOLEAN DEFAULT 1"),
@@ -776,6 +777,7 @@ class Database:
                     protocol_mode TEXT DEFAULT 'session',
                     google_cookies TEXT DEFAULT '',
                     login_account TEXT DEFAULT '',
+                    authuser INTEGER DEFAULT 0,
                     login_password TEXT DEFAULT '',
                     proxy_url TEXT DEFAULT '',
                     auto_refresh_enabled BOOLEAN DEFAULT 1,
@@ -1137,10 +1139,10 @@ class Database:
                                    credits, user_paygate_tier, current_project_id, current_project_name,
                                    image_enabled, video_enabled, image_concurrency, video_concurrency,
                                    captcha_proxy_url, extension_route_key,
-                                   protocol_mode, google_cookies, login_account, login_password,
+                                   protocol_mode, google_cookies, login_account, authuser, login_password,
                                    proxy_url, auto_refresh_enabled, refresh_interval_minutes,
                                    last_st_refresh_at, last_st_refresh_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     token.st,
@@ -1163,6 +1165,7 @@ class Database:
                     token.protocol_mode,
                     token.google_cookies,
                     token.login_account,
+                    token.authuser,
                     token.login_password,
                     token.proxy_url,
                     token.auto_refresh_enabled,

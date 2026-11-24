@@ -39,7 +39,7 @@ from ..core.browser_runtime_status import (
     start_runtime_prepare,
 )
 from ..core.monitoring import build_public_health_snapshot
-from ..services.token_manager import TokenManager
+from ..services.token_manager import TokenManager, frontend_session_token
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
 
@@ -718,6 +718,8 @@ class AddTokenRequest(BaseModel):
     google_cookies: str = Field(min_length=1, max_length=524288)
     # 可选：留空时由 Cookie/会话自动识别，识别失败则使用占位邮箱
     login_account: Optional[str] = Field(default=None, max_length=254)
+    # Multi-account index inside one shared Chrome profile cookie jar (0 = 默认账号)
+    authuser: int = Field(default=0, ge=0, le=100)
     login_password: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_refresh_enabled: bool = True
@@ -750,6 +752,7 @@ class UpdateTokenRequest(BaseModel):
     protocol_mode: Optional[Literal["protocol"]] = None
     google_cookies: Optional[str] = Field(default=None, max_length=524288)
     login_account: Optional[str] = None
+    authuser: Optional[int] = Field(default=None, ge=0, le=100)
     login_password: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_refresh_enabled: Optional[bool] = None
@@ -820,6 +823,7 @@ class ST2ATRequest(BaseModel):
 
     st: str = ""
     google_cookies: Optional[str] = None
+    authuser: int = Field(default=0, ge=0, le=100)
 
 
 class ImportTokenItem(BaseModel):
@@ -829,6 +833,8 @@ class ImportTokenItem(BaseModel):
 
     login_account: Optional[str] = Field(default=None, max_length=254)
     google_cookies: str = Field(min_length=1, max_length=524288)
+    # Multi-account index inside one shared Chrome profile cookie jar (0 = 默认账号)
+    authuser: int = Field(default=0, ge=0, le=100)
     remark: Optional[str] = Field(default=None, max_length=512)
     project_id: Optional[str] = Field(default=None, max_length=255)
     project_name: Optional[str] = Field(default=None, max_length=255)
@@ -887,6 +893,8 @@ class PluginTokenUpdateRequest(BaseModel):
     google_cookies: str = Field(min_length=1, max_length=524288)
     # 可选：留空时按 Cookie 会话定位账号，定位不到则使用占位邮箱
     login_account: Optional[str] = Field(default=None, max_length=254)
+    # Multi-account index inside one shared Chrome profile cookie jar (0 = 默认账号)
+    authuser: int = Field(default=0, ge=0, le=100)
     protocol_mode: Literal["protocol"] = "protocol"
 
     @field_validator("login_account")
@@ -1063,6 +1071,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "protocol_mode": row.get("protocol_mode") or "session",
         "google_cookies": row.get("google_cookies") or "",
         "login_account": row.get("login_account") or "",
+        "authuser": row.get("authuser", 0) or 0,
         "login_password": row.get("login_password") or "",
         "proxy_url": row.get("proxy_url") or "",
         "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
@@ -1114,6 +1123,7 @@ async def add_token(request: AddTokenRequest, token: str = Depends(verify_admin_
             protocol_mode=request.protocol_mode,
             google_cookies=request.google_cookies,
             login_account=request.login_account,
+            authuser=request.authuser,
             login_password=request.login_password,
             proxy_url=request.proxy_url,
             auto_refresh_enabled=request.auto_refresh_enabled,
@@ -1156,10 +1166,18 @@ async def update_token(
         google_cookies = request.google_cookies or (
             existing.google_cookies if existing else ""
         )
+        # Validate the cookies against the account this token will use: the
+        # newly submitted authuser wins, otherwise keep the stored one.
+        effective_authuser = (
+            request.authuser
+            if request.authuser is not None
+            else (getattr(existing, "authuser", 0) or 0)
+        )
         result = await token_manager.flow_client.st_to_at(
             session_value,
             google_cookies=google_cookies,
             token_id=token_id,
+            authuser=effective_authuser,
         )
         at = result["access_token"]
         expires = result.get("expires")
@@ -1197,6 +1215,7 @@ async def update_token(
             protocol_mode=request.protocol_mode,
             google_cookies=request.google_cookies,
             login_account=request.login_account,
+            authuser=request.authuser,
             login_password=request.login_password,
             proxy_url=request.proxy_url,
             auto_refresh_enabled=request.auto_refresh_enabled,
@@ -1316,6 +1335,7 @@ async def st_to_at(request: ST2ATRequest, token: str = Depends(verify_admin_toke
         result = await token_manager.flow_client.st_to_at(
             request.st,
             google_cookies=request.google_cookies,
+            authuser=request.authuser,
         )
         return {
             "success": True,
@@ -1352,22 +1372,23 @@ async def import_tokens(
         try:
             google_cookies = item.google_cookies
             email = str(item.login_account or "").strip().lower()
+            item_authuser = max(0, int(item.authuser or 0))
             detected_email = ""
             if not email:
                 # 未提供账号时，从 Cookie 读取 Flow 登录邮箱并保存最新登录态。
                 identity = await token_manager.detect_account_identity(
-                    google_cookies, proxy_url=item.proxy_url
+                    google_cookies, proxy_url=item.proxy_url, authuser=item_authuser
                 )
                 google_cookies = identity["google_cookies"]
                 email = identity["email"].strip().lower()
                 detected_email = email
-            cookie_hash = hashlib.sha256(google_cookies.encode("utf-8")).hexdigest()
-            st = f"frontend-{cookie_hash[:32]}"
+            st = frontend_session_token(google_cookies, item_authuser)
 
             try:
                 result = await token_manager.flow_client.st_to_at(
                     st,
                     google_cookies=google_cookies,
+                    authuser=item_authuser,
                 )
                 at = result["access_token"]
                 expires = result.get("expires")
@@ -1409,6 +1430,7 @@ async def import_tokens(
                         protocol_mode=item.protocol_mode,
                         google_cookies=google_cookies,
                         login_account=email,
+                        authuser=item_authuser,
                         proxy_url=item.proxy_url,
                         auto_refresh_enabled=item.auto_refresh_enabled,
                         refresh_interval_minutes=item.refresh_interval_minutes,
@@ -1449,6 +1471,7 @@ async def import_tokens(
                         protocol_mode=item.protocol_mode,
                         google_cookies=google_cookies,
                         login_account=email,
+                        authuser=item_authuser,
                         proxy_url=item.proxy_url,
                         auto_refresh_enabled=item.auto_refresh_enabled,
                         refresh_interval_minutes=item.refresh_interval_minutes,
@@ -2735,11 +2758,13 @@ async def plugin_update_token(
 
     google_cookies = request.google_cookies
     email = (request.login_account or "").strip().lower()
+    authuser = max(0, int(request.authuser or 0))
 
     try:
         result = await token_manager.flow_client.st_to_at(
             "",
             google_cookies=google_cookies,
+            authuser=authuser,
         )
         google_cookies = result.get("google_cookies") or google_cookies
         at = result["access_token"]
@@ -2757,7 +2782,9 @@ async def plugin_update_token(
         ) from cookie_error
 
     cookie_hash = hashlib.sha256(google_cookies.encode("utf-8")).hexdigest()[:32]
-    session_token = f"frontend-{cookie_hash}"
+    # The session token must be per (jar, authuser): accounts that share one
+    # Chrome profile share one jar and would otherwise collide on one ST.
+    session_token = frontend_session_token(google_cookies, authuser)
 
     # Step 2: 定位已有账号。邮箱可选：先用邮箱，未提供则按 Cookie 会话(st)反查，
     # 都没有则生成与 add_token 一致的占位邮箱，避免“必须填 Google 账号”的硬性要求。
@@ -2767,7 +2794,12 @@ async def plugin_update_token(
     if existing_token is not None and not email:
         email = str(existing_token.email or existing_token.login_account or "")
     if not email:
-        email = f"account-{cookie_hash[:16]}@flow.local"
+        # Keep the placeholder unique per (jar, authuser) as well.
+        email = (
+            f"account-au{authuser}-{cookie_hash[:12]}@flow.local"
+            if authuser
+            else f"account-{cookie_hash[:16]}@flow.local"
+        )
 
     if existing_token:
         # Update existing token
@@ -2782,6 +2814,7 @@ async def plugin_update_token(
                 protocol_mode=request.protocol_mode,
                 google_cookies=google_cookies,
                 login_account=email,
+                authuser=authuser,
                 auto_enable_on_update=plugin_config.auto_enable_on_update,
             )
             await token_manager.mark_cookie_validated(existing_token.id, email)
@@ -2814,6 +2847,7 @@ async def plugin_update_token(
                 protocol_mode=request.protocol_mode,
                 google_cookies=google_cookies,
                 login_account=email,
+                authuser=authuser,
                 auto_refresh_enabled=True,
                 refresh_interval_minutes=30,
             )
@@ -2863,6 +2897,7 @@ async def plugin_check_tokens(
             {
             "id": row.get("id"),
             "email": email,
+            "authuser": row.get("authuser", 0) or 0,
             "is_active": bool(row.get("is_active")),
             "needs_refresh": needs_refresh,
                 "at_expires": row.get("at_expires").isoformat()

@@ -132,6 +132,7 @@ class ProtocolLogin:
         google_cookies_raw: str,
         proxy: Optional[str] = None,
         email: Optional[str] = None,
+        authuser: int = 0,
     ) -> Dict[str, Any]:
         try:
             validate_flow_cookie_storage(google_cookies_raw)
@@ -141,6 +142,14 @@ class ProtocolLogin:
                 "success": False,
                 "error": str(exc),
             }
+
+        # One Chrome profile shares one Google Cookie jar across all signed-in
+        # accounts; the account is selected per request via ?authuser=N.
+        # authuser=0 keeps the exact upstream URL (default account).
+        authuser = max(0, int(authuser or 0))
+        projects_url = f"{FLOW_BASE}/projects"
+        if authuser:
+            projects_url = f"{projects_url}?authuser={authuser}"
 
         session_kwargs: Dict[str, Any] = {
             "impersonate": IMPERSONATE,
@@ -158,7 +167,7 @@ class ProtocolLogin:
         try:
             async with AsyncSession(**session_kwargs) as session:
                 response = await session.get(
-                    f"{FLOW_BASE}/projects",
+                    projects_url,
                     headers={
                         "Referer": f"{FLOW_BASE}/",
                     },
@@ -208,9 +217,14 @@ class ProtocolLogin:
                     f"[PROTOCOL_LOGIN] 登录账号已变更: {expected_email} -> {account_email}"
                 )
             digest = hashlib.sha256(refreshed_cookies.encode("utf-8")).hexdigest()[:32]
+            # Same scheme as token_manager.frontend_session_token: accounts that
+            # share one jar must not collide on the synthetic session token.
+            session_token = (
+                f"frontend-au{authuser}-{digest}" if authuser else f"frontend-{digest}"
+            )
             return {
                 "success": True,
-                "session_token": f"frontend-{digest}",
+                "session_token": session_token,
                 "email": account_email,
                 "google_cookies": refreshed_cookies,
             }

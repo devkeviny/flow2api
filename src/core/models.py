@@ -48,6 +48,9 @@ class Token(BaseModel):
     protocol_mode: str = "session"  # session/protocol
     google_cookies: str = ""
     login_account: str = ""
+    # Multi-account index inside one shared Chrome profile cookie jar:
+    # Google selects the account per request via ?authuser=N. 0 = default account.
+    authuser: int = 0
     login_password: str = ""
     proxy_url: str = ""
     auto_refresh_enabled: bool = True

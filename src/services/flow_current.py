@@ -123,6 +123,7 @@ class CurrentFlowClientMixin:
         project_id: Optional[str] = None,
         source_path: Optional[str] = None,
         timeout: Optional[int] = None,
+        authuser: int = 0,
     ) -> Any:
         cookie_storage = await self._resolve_flow_frontend_cookie_storage(
             google_cookies=google_cookies,
@@ -136,6 +137,8 @@ class CurrentFlowClientMixin:
             project_id=project_id,
             source_path=source_path,
             cookie_storage=cookie_storage,
+            authuser=authuser,
+            token_id=token_id,
         )
 
     async def st_to_at(
@@ -143,6 +146,7 @@ class CurrentFlowClientMixin:
         st: str = "",
         google_cookies: Optional[str] = None,
         token_id: Optional[int] = None,
+        authuser: int = 0,
     ) -> dict:
         if str(google_cookies or "").strip():
             validate_flow_cookie_storage(google_cookies)
@@ -153,6 +157,7 @@ class CurrentFlowClientMixin:
             self.FRONTEND_ACCESS_TOKEN,
             google_cookies=google_cookies,
             token_id=token_id,
+            authuser=authuser,
         )
         expires = datetime.now(timezone.utc) + timedelta(minutes=55)
         return {
@@ -169,12 +174,14 @@ class CurrentFlowClientMixin:
         st: str,
         title: str,
         google_cookies: Optional[str] = None,
+        authuser: int = 0,
     ) -> str:
         payload = await self._current_rpc(
             rpc_id="jHPbke",
             argument=["projects/*", [None, [title]], [None, 22]],
             google_cookies=google_cookies,
             timeout=max(self._get_control_plane_timeout(), 20),
+            authuser=authuser,
         )
         project_id = self._extract_flow_project_id(payload)
         if not project_id:
@@ -201,12 +208,14 @@ class CurrentFlowClientMixin:
         at: str = "",
         google_cookies: Optional[str] = None,
         token_id: Optional[int] = None,
+        authuser: int = 0,
     ) -> dict:
         payload = await self._current_rpc(
             rpc_id="nzlxg",
             argument=[],
             google_cookies=google_cookies,
             token_id=token_id,
+            authuser=authuser,
         )
         values = payload if isinstance(payload, list) else []
         credits = next(

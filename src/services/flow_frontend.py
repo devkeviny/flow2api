@@ -66,6 +66,24 @@ class FlowFrontendMixin:
             )
         return cookie_storage
 
+    async def _resolve_token_authuser(self, token_id: Optional[int]) -> int:
+        """Resolve the ?authuser=N index for a token (0 = default account).
+
+        Accounts that share one Chrome profile also share one Cookie jar, so
+        the jar alone cannot select the account; the stored per-token index
+        does. Any failure degrades to 0, i.e. exact upstream behavior.
+        """
+        if not token_id or self.db is None or not hasattr(self.db, "get_token"):
+            return 0
+        try:
+            token = await self.db.get_token(int(token_id))
+            return max(0, int(getattr(token, "authuser", 0) or 0)) if token else 0
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[FLOW RPC] 读取 Token-{token_id} 的 authuser 失败: {e}"
+            )
+            return 0
+
     @staticmethod
     def _parse_batchexecute_frames(response_text: str) -> List[List[Any]]:
         frames: List[List[Any]] = []
@@ -737,11 +755,23 @@ class FlowFrontendMixin:
         project_id: Optional[str] = None,
         source_path: Optional[str] = None,
         cookie_storage: Optional[str] = None,
+        authuser: int = 0,
+        token_id: Optional[int] = None,
     ) -> Any:
+        # Resolve the account index: an explicit authuser wins, otherwise fall
+        # back to the token's stored index. 0 keeps the exact upstream URLs.
+        effective_authuser = max(0, int(authuser or 0))
+        if not effective_authuser and token_id is not None:
+            effective_authuser = await self._resolve_token_authuser(token_id)
+        authuser_suffix = (
+            f"authuser={effective_authuser}" if effective_authuser else ""
+        )
         resolved_source_path = source_path or (
             f"/project/{project_id}" if project_id else "/projects"
         )
         page_url = f"https://flow.google.com{resolved_source_path}"
+        if authuser_suffix:
+            page_url = f"{page_url}?{authuser_suffix}"
         bootstrap_cookie_header = (
             serialize_cookie_header_for_url(cookie_storage, page_url)
             if str(cookie_storage or "").strip()
@@ -778,6 +808,8 @@ class FlowFrontendMixin:
             f"&f.sid={frontend_session_id}&hl=en"
             f"&_reqid={request_counter}&rt=c"
         )
+        if authuser_suffix:
+            url = f"{url}&{authuser_suffix}"
         rpc_cookie_header = serialize_cookie_header_for_url(
             cookie_jar.export_storage(), url
         )

@@ -14,6 +14,24 @@ from .flow_client import FlowClient
 from .proxy_manager import ProxyManager
 
 
+def frontend_session_token(google_cookies: str, authuser: int = 0) -> str:
+    """Derive the synthetic frontend session token (ST) for a Cookie jar.
+
+    The ST is `frontend-<sha256(cookies)[:32]>`. Accounts that share one
+    Chrome profile also share one Cookie jar, so the authuser index must be
+    part of the identity or every account would collide on the same ST
+    (and on the UNIQUE tokens.st constraint). authuser=0 keeps the exact
+    upstream format so existing tokens keep matching their stored ST.
+    """
+    cookie_hash = hashlib.sha256((google_cookies or "").encode("utf-8")).hexdigest()[
+        :32
+    ]
+    authuser = max(0, int(authuser or 0))
+    if authuser:
+        return f"frontend-au{authuser}-{cookie_hash}"
+    return f"frontend-{cookie_hash}"
+
+
 class TokenManager:
     """Token lifecycle manager with AT auto-refresh"""
 
@@ -208,6 +226,7 @@ class TokenManager:
                 st,
                 google_cookies=token.google_cookies,
                 token_id=token.id,
+                authuser=getattr(token, "authuser", 0) or 0,
             ),
         )
 
@@ -218,6 +237,7 @@ class TokenManager:
                 at,
                 google_cookies=token.google_cookies,
                 token_id=token.id,
+                authuser=getattr(token, "authuser", 0) or 0,
             ),
         )
 
@@ -275,6 +295,7 @@ class TokenManager:
             token.st,
             project_name,
             google_cookies=token.google_cookies,
+            authuser=getattr(token, "authuser", 0) or 0,
         )
         debug_logger.log_info(
             f"[PROJECT] Created pooled project for token {token.id}: {project_name} ({project_id})"
@@ -387,17 +408,16 @@ class TokenManager:
         protocol_mode: str = "session",
         google_cookies: Optional[str] = None,
         login_account: Optional[str] = None,
+        authuser: int = 0,
         login_password: Optional[str] = None,
         proxy_url: Optional[str] = None,
         auto_refresh_enabled: bool = True,
         refresh_interval_minutes: int = 30,
     ) -> Token:
         """Add a new token and prepare its pooled projects."""
+        authuser = max(0, int(authuser or 0))
         if not st and google_cookies:
-            cookie_hash = hashlib.sha256(google_cookies.encode("utf-8")).hexdigest()[
-                :32
-            ]
-            st = f"frontend-{cookie_hash}"
+            st = frontend_session_token(google_cookies, authuser)
         existing_token = await self.db.get_token_by_st(st) if st else None
         if existing_token:
             raise ValueError(f"Token 已存在：{existing_token.email}")
@@ -407,6 +427,7 @@ class TokenManager:
             result = await self.flow_client.st_to_at(
                 st,
                 google_cookies=google_cookies,
+                authuser=authuser,
             )
             google_cookies = result.get("google_cookies") or google_cookies
             at = result["access_token"]
@@ -417,7 +438,7 @@ class TokenManager:
                 # 新版 Flow 的会话接口不返回账号信息，直接从 Cookie 读取真实登录邮箱。
                 try:
                     identity = await self.detect_account_identity(
-                        google_cookies, proxy_url=proxy_url
+                        google_cookies, proxy_url=proxy_url, authuser=authuser
                     )
                     email = identity["email"]
                     google_cookies = identity["google_cookies"]
@@ -450,6 +471,7 @@ class TokenManager:
             credits_result = await self.flow_client.get_credits(
                 at,
                 google_cookies=google_cookies,
+                authuser=authuser,
             )
             credits = credits_result.get("credits", 0)
             user_paygate_tier = credits_result.get("userPaygateTier")
@@ -481,6 +503,7 @@ class TokenManager:
                     st,
                     first_project_name,
                     google_cookies=google_cookies,
+                    authuser=authuser,
                 )
                 debug_logger.log_info(
                     f"[ADD_TOKEN] Created pooled project #1: {first_project_name} (ID: {first_project_id})"
@@ -498,9 +521,7 @@ class TokenManager:
 
         google_cookies = self._latest_google_cookies(google_cookies)
         if google_cookies and st.startswith("frontend-"):
-            st = "frontend-" + hashlib.sha256(
-                google_cookies.encode("utf-8")
-            ).hexdigest()[:32]
+            st = frontend_session_token(google_cookies, authuser)
         token = Token(
             st=st,
             at=at,
@@ -522,6 +543,7 @@ class TokenManager:
             protocol_mode=self._normalize_protocol_mode(protocol_mode),
             google_cookies=(google_cookies or "").strip(),
             login_account=(login_account or "").strip(),
+            authuser=authuser,
             login_password=login_password or "",
             proxy_url=self._normalize_token_proxy_url(proxy_url),
             auto_refresh_enabled=bool(auto_refresh_enabled),
@@ -549,9 +571,7 @@ class TokenManager:
         if latest_cookies != token.google_cookies:
             token.google_cookies = latest_cookies
             if token.st.startswith("frontend-"):
-                token.st = "frontend-" + hashlib.sha256(
-                    latest_cookies.encode("utf-8")
-                ).hexdigest()[:32]
+                token.st = frontend_session_token(latest_cookies, authuser)
             await self.db.update_token(token_id, google_cookies=latest_cookies, st=token.st)
 
         debug_logger.log_info(
@@ -578,6 +598,7 @@ class TokenManager:
         protocol_mode: Optional[str] = None,
         google_cookies: Optional[str] = None,
         login_account: Optional[str] = None,
+        authuser: Optional[int] = None,
         login_password: Optional[str] = None,
         proxy_url: Optional[str] = None,
         auto_refresh_enabled: Optional[bool] = None,
@@ -629,6 +650,8 @@ class TokenManager:
             update_fields["google_cookies"] = google_cookies.strip()
         if login_account is not None:
             update_fields["login_account"] = login_account.strip()
+        if authuser is not None:
+            update_fields["authuser"] = max(0, int(authuser))
         if login_password is not None:
             update_fields["login_password"] = login_password
         if proxy_url is not None:
@@ -887,7 +910,7 @@ class TokenManager:
             result = await (
                 self._st_to_at_for_token(token, st)
                 if token is not None
-                else self.flow_client.st_to_at(st)
+                else self.flow_client.st_to_at(st, token_id=token_id)
             )
             new_at = result["access_token"]
             expires = result.get("expires")
@@ -923,7 +946,7 @@ class TokenManager:
                 credits_result = await (
                     self._get_credits_for_token(verification_token, new_at)
                     if verification_token is not None
-                    else self.flow_client.get_credits(new_at)
+                    else self.flow_client.get_credits(new_at, token_id=token_id)
                 )
             except Exception as verify_err:
                 # AT 验证失败（可能返回 401），说明 ST 已过期
@@ -952,9 +975,9 @@ class TokenManager:
                     "at": new_at,
                     "at_expires": new_at_expires,
                     "google_cookies": latest_cookies,
-                    "st": "frontend-" + hashlib.sha256(
-                        latest_cookies.encode("utf-8")
-                    ).hexdigest()[:32],
+                    "st": frontend_session_token(
+                        latest_cookies, getattr(token, "authuser", 0) or 0
+                    ),
                 }
                 validated = credits_result if credits_result is not None else result
                 if "credits" in validated:
@@ -1000,6 +1023,7 @@ class TokenManager:
         self,
         google_cookies: str,
         proxy_url: Optional[str] = None,
+        authuser: int = 0,
     ) -> Dict[str, str]:
         """Read the Flow login email bound to a Google/Flow Cookie jar.
 
@@ -1011,6 +1035,7 @@ class TokenManager:
         cookies = str(google_cookies or "").strip()
         if not cookies:
             raise ValueError("Google Cookies 不能为空")
+        authuser = max(0, int(authuser or 0))
         normalized_proxy = self._normalize_token_proxy_url(proxy_url)
         if not normalized_proxy:
             proxy_manager = getattr(self.flow_client, "proxy_manager", None)
@@ -1022,7 +1047,7 @@ class TokenManager:
                 except Exception:
                     normalized_proxy = ""
         result = await protocol_loginer.login(
-            cookies, proxy=normalized_proxy or None
+            cookies, proxy=normalized_proxy or None, authuser=authuser
         )
         if not result.get("success"):
             raise ValueError(
@@ -1034,10 +1059,7 @@ class TokenManager:
         refreshed_cookies = str(result.get("google_cookies") or cookies).strip()
         session_token = str(result.get("session_token") or "").strip()
         if not session_token:
-            digest = hashlib.sha256(
-                refreshed_cookies.encode("utf-8")
-            ).hexdigest()[:32]
-            session_token = f"frontend-{digest}"
+            session_token = frontend_session_token(refreshed_cookies, authuser)
         return {
             "email": email,
             "google_cookies": refreshed_cookies,
@@ -1087,14 +1109,18 @@ class TokenManager:
                 f"{expected_raw or '<空>'} -> {observed_raw}"
             )
 
-        new_st = "frontend-" + hashlib.sha256(cookies.encode("utf-8")).hexdigest()[:32]
+        new_st = frontend_session_token(
+            cookies, getattr(token, "authuser", 0) or 0
+        )
         candidate = token.model_copy(update={"google_cookies": cookies, "st": new_st})
         session = await self._st_to_at_for_token(candidate, new_st)
         new_at = str(session.get("access_token") or "").strip()
         if not new_at:
             raise RuntimeError("Flow 登录态验证响应缺少 access_token")
         cookies = session.get("google_cookies") or cookies
-        new_st = "frontend-" + hashlib.sha256(cookies.encode("utf-8")).hexdigest()[:32]
+        new_st = frontend_session_token(
+            cookies, getattr(token, "authuser", 0) or 0
+        )
         updates = {
             "google_cookies": cookies,
             "st": new_st,
@@ -1151,7 +1177,9 @@ class TokenManager:
                 if proxy_manager is not None:
                     proxy_url = await proxy_manager.get_request_proxy_url()
             result = await protocol_loginer.login(
-                token.google_cookies, proxy=proxy_url or None,
+                token.google_cookies,
+                proxy=proxy_url or None,
+                authuser=getattr(token, "authuser", 0) or 0,
             )
             if not result.get("success"):
                 raise RuntimeError(str(result.get("error") or "Flow Cookie 刷新失败"))

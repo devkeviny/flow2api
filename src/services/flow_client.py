@@ -1405,11 +1405,12 @@ class _FlowClientBase(FlowFrontendMixin):
 
     # ========== 认证相关 (使用ST) ==========
 
-    async def st_to_at(self, st: str) -> dict:
+    async def st_to_at(self, st: str, authuser: int = 0) -> dict:
         """ST转AT
 
         Args:
             st: Session Token
+            authuser: Multi-account index (?authuser=N); 0 = default account.
 
         Returns:
             {
@@ -1418,7 +1419,11 @@ class _FlowClientBase(FlowFrontendMixin):
                 "user": {...}
             }
         """
+        # NOTE: shadowed at runtime by CurrentFlowClientMixin.st_to_at (frontend
+        # RPC); kept authuser-aware so a direct base-class call stays correct.
         url = f"{self.labs_base_url}/auth/session"
+        if authuser:
+            url = f"{url}?authuser={max(0, int(authuser))}"
         try:
             return await self._make_request(
                 method="GET",
