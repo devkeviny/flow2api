@@ -1421,9 +1421,18 @@ async def liveview_websocket(websocket: WebSocket, token_id: int):
     query_token = websocket.query_params.get(
         "admin_token"
     ) or websocket.query_params.get("token")
-    cookie_token = websocket.cookies.get("admin_token")
+    # NOTE: the login cookie is ADMIN_SESSION_COOKIE_NAME ("admin_session"),
+    # not "admin_token" — reading the wrong name rejected every WS handshake
+    # with 403 while the REST calls (verify_admin_token) worked fine.
+    cookie_token = get_admin_token_from_cookie(websocket)
     candidate = query_token or cookie_token
     if not candidate or not is_admin_session_token_valid(candidate):
+        from ..core.logger import debug_logger
+
+        debug_logger.log_warning(
+            f"[LiveView] WS recusado token_id={token_id}: "
+            "token ausente ou inválido"
+        )
         await websocket.close(code=1008)
         return
 

@@ -508,7 +508,10 @@
     "启动失败: {error}": "启动失败: {error}",
     "正在保存登录凭证...": "正在保存登录凭证...",
     "登录凭证已保存: {0}": "登录凭证已保存: {0}",
-    "保存失败: {error}": "保存失败: {error}"
+    "保存失败: {error}": "保存失败: {error}",
+    "已登录: {0}": "已登录: {0}",
+    "远程浏览器连接失败": "远程浏览器连接失败",
+    "远程浏览器错误": "远程浏览器错误"
   },
   "en": {
     "管理控制台 - Flow2API": "Admin Console - Flow2API",
@@ -1019,6 +1022,9 @@
     "启动失败: {error}": "Failed to start: {error}",
     "正在保存登录凭证...": "Saving login credentials...",
     "登录凭证已保存: {0}": "Login credentials saved: {0}",
-    "保存失败: {error}": "Failed to save: {error}"
+    "保存失败: {error}": "Failed to save: {error}",
+    "已登录: {0}": "Logged in: {0}",
+    "远程浏览器连接失败": "Remote browser connection failed",
+    "远程浏览器错误": "Remote browser error"
   }
 }
