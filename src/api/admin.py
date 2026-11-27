@@ -1355,6 +1355,15 @@ async def liveview_start(token_id: int, token: str = Depends(verify_admin_token)
     try:
         status = await service.start_session(token_id)
     except LiveViewError as e:
+        import traceback
+
+        from ..core.logger import debug_logger
+
+        debug_logger.log_error(
+            f"[LiveView] start failed token_id={token_id}: {e}",
+            status_code=e.status_code,
+            response_text=traceback.format_exc(),
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
     return {"success": True, **status}
 

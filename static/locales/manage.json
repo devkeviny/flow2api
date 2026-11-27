@@ -499,7 +499,16 @@
     "放大视频": "放大视频",
     "图片结果已返回": "图片结果已返回",
     "视频结果已返回": "视频结果已返回",
-    "操作类型:": "操作类型:"
+    "操作类型:": "操作类型:",
+    "远程登录": "远程登录",
+    "在远程浏览器中完成 Google 登录（包括二次验证），看到 Flow 已登录后再点“完成登录并保存”。关闭窗口会取消本次登录，不保存任何凭证。": "在远程浏览器中完成 Google 登录（包括二次验证），看到 Flow 已登录后再点“完成登录并保存”。关闭窗口会取消本次登录，不保存任何凭证。",
+    "重新加载": "重新加载",
+    "完成登录并保存": "完成登录并保存",
+    "正在启动远程浏览器...": "正在启动远程浏览器...",
+    "启动失败: {error}": "启动失败: {error}",
+    "正在保存登录凭证...": "正在保存登录凭证...",
+    "登录凭证已保存: {0}": "登录凭证已保存: {0}",
+    "保存失败: {error}": "保存失败: {error}"
   },
   "en": {
     "管理控制台 - Flow2API": "Admin Console - Flow2API",
@@ -1001,6 +1010,15 @@
     "放大视频": "Upscale video",
     "图片结果已返回": "Image result returned",
     "视频结果已返回": "Video result returned",
-    "操作类型:": "Operation:"
+    "操作类型:": "Operation:",
+    "远程登录": "Remote login",
+    "在远程浏览器中完成 Google 登录（包括二次验证），看到 Flow 已登录后再点“完成登录并保存”。关闭窗口会取消本次登录，不保存任何凭证。": "Complete the Google login in the remote browser (including 2FA). Once Flow shows as logged in, click “Finish login and save”. Closing the window cancels this login and saves nothing.",
+    "重新加载": "Reload",
+    "完成登录并保存": "Finish login and save",
+    "正在启动远程浏览器...": "Starting remote browser...",
+    "启动失败: {error}": "Failed to start: {error}",
+    "正在保存登录凭证...": "Saving login credentials...",
+    "登录凭证已保存: {0}": "Login credentials saved: {0}",
+    "保存失败: {error}": "Failed to save: {error}"
   }
 }

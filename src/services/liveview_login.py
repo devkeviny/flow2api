@@ -44,6 +44,7 @@ LIVEVIEW_VIEWPORT_HEIGHT = 800
 LIVEVIEW_SESSION_TTL_SECONDS = 15 * 60
 LIVEVIEW_LAUNCH_TIMEOUT_SECONDS = 60.0
 LIVEVIEW_NAVIGATE_TIMEOUT_SECONDS = 30.0
+LIVEVIEW_PAGE_TARGET_WAIT_SECONDS = 10.0
 LIVEVIEW_COMMAND_TIMEOUT_SECONDS = 5.0
 LIVEVIEW_FRAME_INTERVAL_SECONDS = 0.5
 LIVEVIEW_STATE_POLL_SECONDS = 2.0
@@ -101,6 +102,28 @@ def liveview_profile_dir(token_id: int) -> Path:
     return (
         PERSONAL_RUNTIME_DATA_DIR / "browser_profiles" / f"token_{int(token_id)}"
     ).resolve()
+
+
+async def _wait_for_page_target(browser, timeout_seconds: float):
+    """Poll update_targets() until a page target exists (or timeout).
+
+    nodriver's Browser.get() does a bare next() over page targets, so calling
+    it right after uc.start() raises StopIteration (surfaced as RuntimeError
+    'coroutine raised StopIteration') when the first tab has not registered
+    yet. Callers must wait for a target before navigating.
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    while True:
+        try:
+            await browser.update_targets()
+        except Exception:
+            pass
+        for target in getattr(browser, "targets", []) or []:
+            if getattr(target, "type_", None) == "page":
+                return target
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.2)
 
 
 @dataclass
@@ -274,10 +297,7 @@ class LiveViewLoginService:
 
         session.browser = browser
         try:
-            tab = await asyncio.wait_for(
-                browser.get(LIVEVIEW_START_URL),
-                timeout=LIVEVIEW_NAVIGATE_TIMEOUT_SECONDS,
-            )
+            tab = await self._open_login_tab(browser)
             session.tab = tab
             await asyncio.wait_for(
                 tab.send(
@@ -306,6 +326,64 @@ class LiveViewLoginService:
             f"session_id={session_id}, profile={profile_dir})"
         )
         return session
+
+    async def _open_login_tab(self, browser) -> Any:
+        """Open the login page on a guaranteed page target.
+
+        Never call browser.get() on a fresh browser: nodriver 0.50.8 does a
+        bare next() over page targets, so when the first tab has not
+        registered yet it raises StopIteration, which Python turns into
+        RuntimeError('coroutine raised StopIteration'). Wait for a page
+        target first; if none appears, create one explicitly (same pattern
+        as the captcha service's _create_default_context_target_tab).
+        """
+        from nodriver import cdp
+
+        tab = await _wait_for_page_target(browser, LIVEVIEW_PAGE_TARGET_WAIT_SECONDS)
+        if tab is not None:
+            try:
+                await tab.attach()
+            except Exception:
+                pass
+            await asyncio.wait_for(
+                tab.get(LIVEVIEW_START_URL),
+                timeout=LIVEVIEW_NAVIGATE_TIMEOUT_SECONDS,
+            )
+            return tab
+        target_id = await asyncio.wait_for(
+            browser.send(
+                cdp.target.create_target(
+                    LIVEVIEW_START_URL,
+                    new_window=True,
+                    enable_begin_frame_control=True,
+                )
+            ),
+            timeout=LIVEVIEW_NAVIGATE_TIMEOUT_SECONDS,
+        )
+        deadline = time.monotonic() + LIVEVIEW_NAVIGATE_TIMEOUT_SECONDS
+        while True:
+            try:
+                await browser.update_targets()
+            except Exception:
+                pass
+            tab = next(
+                (
+                    item
+                    for item in getattr(browser, "targets", []) or []
+                    if getattr(item, "type_", None) == "page"
+                    and getattr(item, "target_id", None) == target_id
+                ),
+                None,
+            )
+            if tab is not None:
+                await tab.attach()
+                return tab
+            if time.monotonic() >= deadline:
+                raise LiveViewLaunchError(
+                    "Falha ao abrir a página de login: target não apareceu "
+                    "após create_target"
+                )
+            await asyncio.sleep(0.15)
 
     async def _session_ttl_watchdog(self, session: LiveViewSession) -> None:
         try:
