@@ -1236,25 +1236,6 @@ class TokenManager:
                 return await self._do_refresh_at(token_id, latest.st, latest)
             return False
 
-    async def commit_refreshed_cookies(
-        self, token_id: int, result: Dict[str, Any]
-    ) -> str:
-        """Commit a browser-harvested Cookie jar (e.g. LiveView login) for a token.
-
-        Same validation/commit path as the cookie refresh: validates the jar,
-        checks the observed account against other tokens, derives ST with the
-        token's authuser, validates ST->AT via RPC and commits atomically.
-        Returns the new ST. Raises ValueError/RuntimeError on validation failure.
-        """
-        refresh_lock = await self._get_token_lock(
-            self._refresh_locks, self._refresh_lock_guard, token_id
-        )
-        async with refresh_lock:
-            token = await self.db.get_token(token_id)
-            if not token:
-                raise ValueError(f"Token {token_id} 不存在")
-            return await self._save_refreshed_cookies(token_id, token, result)
-
     async def _refresh_protocol_token(self, token: Token, now: datetime) -> None:
         token_id = int(token.id)
         refresh_lock = await self._get_token_lock(

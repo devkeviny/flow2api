@@ -9346,45 +9346,6 @@ class BrowserCaptchaService:
 
         return None, None, None, None, None
 
-    async def resolve_login_proxy(self):
-        """Resolve the proxy for the LiveView login browser.
-
-        Same priority as _resolve_personal_proxy, but a resolved proxy that is
-        not TCP-reachable (e.g. the decommissioned frps host, which no longer
-        resolves in DNS) falls back to the process env proxy
-        (HTTPS_PROXY / HTTP_PROXY / PROXY_URL, e.g. socks5://tailscale:1080).
-        Scoped to the login browser only; captcha / request proxy behaviour
-        is unchanged.
-        """
-        protocol, host, port, username, password = (
-            await self._resolve_personal_proxy()
-        )
-        if protocol and host and port:
-            try:
-                reachable = await self._is_tcp_endpoint_reachable(
-                    str(host), int(port), timeout_seconds=1.0
-                )
-            except Exception:
-                reachable = False
-            if reachable:
-                return protocol, host, port, username, password
-            debug_logger.log_warning(
-                "[BrowserCaptcha] Proxy de login configurado inalcançável, "
-                f"tentando fallback de ambiente: {_redact_proxy_url(_compose_proxy_url(protocol, host, port, username, password))}"
-            )
-        for env_name in ("HTTPS_PROXY", "HTTP_PROXY", "PROXY_URL"):
-            candidate = str(os.environ.get(env_name, "") or "").strip()
-            if not candidate:
-                continue
-            protocol, host, port, username, password = _parse_proxy_url(candidate)
-            if protocol and host and port:
-                debug_logger.log_info(
-                    "[BrowserCaptcha] LiveView usando proxy de ambiente: "
-                    f"{_redact_proxy_url(candidate)}"
-                )
-                return protocol, host, port, username, password
-        return None, None, None, None, None
-
     async def _is_tcp_endpoint_reachable(
         self,
         host: str,
@@ -16336,13 +16297,6 @@ class _PersonalBrowserPoolService:
         if not self._workers:
             raise RuntimeError("没有可用的浏览器实例")
         await self._workers[0].open_login_window()
-
-    async def resolve_login_proxy(self):
-        """Delegate LiveView login-proxy resolution to the first pool worker."""
-        await self._ensure_workers()
-        if not self._workers:
-            return None, None, None, None, None
-        return await self._workers[0].resolve_login_proxy()
 
     async def warmup_resident_tabs(
         self,
