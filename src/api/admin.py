@@ -6,7 +6,7 @@ import importlib
 import sys
 import json
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Literal
@@ -55,6 +55,7 @@ token_manager: TokenManager = None
 proxy_manager: ProxyManager = None
 db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
+_liveview_service = None
 captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 
 # Store active admin session tokens (in production, use Redis or database)
@@ -695,6 +696,16 @@ def set_dependencies(
     concurrency_manager = cm
 
 
+def get_liveview_service():
+    """Lazy LiveView login service (created after set_dependencies)."""
+    global _liveview_service
+    if _liveview_service is None:
+        from ..services.liveview_login import LiveViewLoginService
+
+        _liveview_service = LiveViewLoginService(db, token_manager)
+    return _liveview_service
+
+
 # ========== Request Models ==========
 
 
@@ -1326,6 +1337,209 @@ async def refresh_at(token_id: int, token: str = Depends(verify_admin_token)):
     except Exception as e:
         debug_logger.log_error(f"[API] 刷新AT异常: {str(e)}")
         raise HTTPException(status_code=500, detail=f"刷新AT失败: {str(e)}")
+
+
+# ========== LiveView Remote Login ==========
+# Interactive Google login in the dashboard: a dedicated headless Chromium
+# streams screenshots over WebSocket and receives mouse/keyboard input.
+# Cookies are harvested only on explicit "finish" and committed through the
+# same validated path as the cookie refresh. No password/TOTP is ever handled.
+
+
+@router.post("/api/tokens/{token_id}/liveview/start")
+async def liveview_start(token_id: int, token: str = Depends(verify_admin_token)):
+    """Start a remote-login session: launch the dedicated login browser."""
+    from ..services.liveview_login import LiveViewError
+
+    service = get_liveview_service()
+    try:
+        status = await service.start_session(token_id)
+    except LiveViewError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    return {"success": True, **status}
+
+
+@router.get("/api/tokens/{token_id}/liveview/status")
+async def liveview_status(token_id: int, token: str = Depends(verify_admin_token)):
+    service = get_liveview_service()
+    return {"success": True, **await service.get_status(token_id)}
+
+
+@router.post("/api/tokens/{token_id}/liveview/finish")
+async def liveview_finish(token_id: int, token: str = Depends(verify_admin_token)):
+    """Harvest cookies from the login browser and commit them to the token."""
+    from ..services.liveview_login import LiveViewError
+
+    service = get_liveview_service()
+    try:
+        result = await service.finish_session(token_id)
+    except LiveViewError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=502, detail="Falha ao salvar login, tente novamente"
+        )
+    return result
+
+
+@router.post("/api/tokens/{token_id}/liveview/cancel")
+async def liveview_cancel(token_id: int, token: str = Depends(verify_admin_token)):
+    service = get_liveview_service()
+    await service.cancel_session(token_id)
+    return {"success": True}
+
+
+@router.delete("/api/tokens/{token_id}/liveview/profile")
+async def liveview_delete_profile(
+    token_id: int, token: str = Depends(verify_admin_token)
+):
+    """Delete the persistent login profile directory of a token."""
+    from ..services.liveview_login import LiveViewError
+
+    service = get_liveview_service()
+    try:
+        deleted = await service.delete_profile(token_id)
+    except LiveViewError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    return {"success": True, "deleted": deleted}
+
+
+@router.websocket("/api/tokens/{token_id}/liveview/ws")
+async def liveview_websocket(websocket: WebSocket, token_id: int):
+    """Stream screenshots and forward mouse/keyboard input for a session."""
+    query_token = websocket.query_params.get(
+        "admin_token"
+    ) or websocket.query_params.get("token")
+    cookie_token = websocket.cookies.get("admin_token")
+    candidate = query_token or cookie_token
+    if not candidate or not is_admin_session_token_valid(candidate):
+        await websocket.close(code=1008)
+        return
+
+    from ..core.logger import debug_logger
+    from ..services.liveview_login import (
+        LIVEVIEW_FRAME_INTERVAL_SECONDS,
+        LIVEVIEW_VIEWPORT_HEIGHT,
+        LIVEVIEW_VIEWPORT_WIDTH,
+        LiveViewNoSessionError,
+    )
+
+    service = get_liveview_service()
+    session = service.get_active_session(token_id)
+    if session is None:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    stop_event = asyncio.Event()
+
+    async def _frame_pump():
+        state_tick = 0
+        try:
+            while not stop_event.is_set():
+                if session.closed:
+                    break
+                try:
+                    frame = await service.capture_frame(session)
+                    if frame:
+                        await websocket.send_json(
+                            {
+                                "type": "frame",
+                                "data": frame,
+                                "width": LIVEVIEW_VIEWPORT_WIDTH,
+                                "height": LIVEVIEW_VIEWPORT_HEIGHT,
+                            }
+                        )
+                except Exception:
+                    # A single failed frame must not kill the session.
+                    pass
+                state_tick += 1
+                if state_tick % 4 == 0:
+                    try:
+                        probe = await service.probe_login(session)
+                        await websocket.send_json({"type": "state", **probe})
+                    except Exception:
+                        pass
+                await asyncio.sleep(LIVEVIEW_FRAME_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            debug_logger.log_warning(f"[LiveView] frame pump encerrado: {e}")
+
+    pump_task = asyncio.create_task(_frame_pump())
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                message = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(message, dict):
+                continue
+            msg_type = str(message.get("type") or "")
+            try:
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                elif msg_type == "mouse":
+                    await service.send_mouse(
+                        session,
+                        event=str(message.get("event") or ""),
+                        x=float(message.get("x") or 0),
+                        y=float(message.get("y") or 0),
+                        button=str(message.get("button") or "left"),
+                        buttons=int(message.get("buttons") or 0),
+                        click_count=int(message.get("clickCount") or 1),
+                    )
+                elif msg_type == "key":
+                    await service.send_key(
+                        session,
+                        event=str(message.get("event") or ""),
+                        key=str(message.get("key") or ""),
+                        code=str(message.get("code") or ""),
+                        key_code=int(message.get("keyCode") or 0),
+                    )
+                elif msg_type == "text":
+                    await service.send_text(
+                        session, text=str(message.get("text") or "")
+                    )
+                elif msg_type == "navigate":
+                    await service.navigate(session, url=str(message.get("url") or ""))
+                else:
+                    continue
+            except LiveViewNoSessionError:
+                await websocket.send_json(
+                    {"type": "error", "message": "Sessão de login encerrada"}
+                )
+                break
+            except ValueError as e:
+                await websocket.send_json({"type": "error", "message": str(e)})
+            except Exception as e:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"Falha de input: {type(e).__name__}",
+                    }
+                )
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        debug_logger.log_warning(f"[LiveView] websocket encerrado: {e}")
+    finally:
+        stop_event.set()
+        pump_task.cancel()
+        try:
+            await pump_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        await service.close_session(session, reason="ws_disconnect")
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
 
 
 @router.post("/api/tokens/st2at")
