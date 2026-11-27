@@ -1534,6 +1534,13 @@ async def liveview_websocket(websocket: WebSocket, token_id: int):
             except ValueError as e:
                 await websocket.send_json({"type": "error", "message": str(e)})
             except Exception as e:
+                # Log server-side too: the toast alone never showed the
+                # exception in the container log (the 2026-11-27 mouse
+                # AttributeError was only visible client-side).
+                debug_logger.log_warning(
+                    f"[LiveView] Falha de input token_id={token_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
                 await websocket.send_json(
                     {
                         "type": "error",

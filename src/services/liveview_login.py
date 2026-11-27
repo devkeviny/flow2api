@@ -567,7 +567,14 @@ class LiveViewLoginService:
                         type_=type_,
                         x=clamped_x,
                         y=clamped_y,
-                        button=button_value if type_ != "mouseMoved" else "none",
+                        # NOTE: nodriver's generated code calls
+                        # button.to_json() — a plain str raises
+                        # AttributeError and broke EVERY mouse event
+                        # ("Falha de input: AttributeError"). It needs
+                        # the MouseButton enum member, not the string.
+                        button=cdp.input_.MouseButton(
+                            button_value if type_ != "mouseMoved" else "none"
+                        ),
                         buttons=int(buttons or 0),
                         click_count=int(click_count or 1),
                     )
